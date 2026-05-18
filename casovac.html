@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<title>Časovač titulků</title>
+<style>
+  body { font-family: sans-serif; background: #1e1e1e; color: #ddd; margin: 0; padding: 16px; }
+  body.grabbing, body.grabbing * { cursor: grabbing !important; }
+  .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .controls .sep { width: 1px; height: 24px; background: #444; }
+  video { width: 100%; max-height: 50vh; background: black; display: block; }
+
+  .hint { font-size: 12px; color: #888; margin: 6px 0 4px; line-height: 1.6; }
+  .hint b { color: #ffcc00; }
+
+  .timeline-wrapper {
+    position: relative; margin-top: 4px; border: 1px solid #444;
+    background: #2a2a2a;
+    overflow-x: auto; overflow-y: hidden;
+    user-select: none;
+    height: 124px;
+  }
+  .timeline-wrapper::-webkit-scrollbar { height: 12px; }
+  .timeline-wrapper::-webkit-scrollbar-track { background: #1a1a1a; }
+  .timeline-wrapper::-webkit-scrollbar-thumb { background: #555; border-radius: 6px; border: 2px solid #1a1a1a; }
+  .timeline-wrapper::-webkit-scrollbar-thumb:hover { background: #777; }
+
+  .timeline { position: relative; height: 100px; cursor: grab; }
+  .timeline-wrapper.dragging .timeline { cursor: grabbing; }
+
+  .ruler {
+    position: relative; height: 22px;
+    background: #1a1a1a; border-bottom: 1px solid #555;
+  }
+  .tick-major, .tick-minor {
+    position: absolute; top: 0; width: 1px; background: #555; pointer-events: none;
+  }
+  .tick-major { height: 22px; background: #777; }
+  .tick-minor { height: 6px; }
+  .tick-label {
+    position: absolute; top: 5px; font-size: 10px; color: #aaa;
+    padding-left: 3px; white-space: nowrap; pointer-events: none;
+  }
+
+  .subs-track { position: relative; height: 78px; will-change: transform; }
+  .sub-block {
+    position: absolute; top: 18px; height: 42px;
+    background: #3a7bd5; color: white; border-radius: 4px;
+    font-size: 12px; padding: 4px 6px; box-sizing: border-box;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    cursor: pointer;
+    transition: background 0.1s, box-shadow 0.1s;
+  }
+  .sub-block:hover { background: #5a9ff5; box-shadow: 0 0 0 2px #ffcc00; }
+
+  .playhead {
+    position: absolute; top: 0; height: 100px; width: 2px;
+    background: red; pointer-events: none; z-index: 11;
+    margin-left: -1px;
+  }
+  .marker {
+    position: absolute; top: 0; height: 100px; width: 0;
+    border-left: 2px dashed #ffcc00;
+    z-index: 10;
+  }
+  .marker[hidden] { display: none; }
+  .marker-hit {
+    position: absolute; top: 0; bottom: 0; left: -6px; width: 14px;
+    cursor: grab;
+    transition: background 0.1s;
+  }
+  .marker-hit:hover { background: rgba(255, 204, 0, 0.18); }
+  .marker-flag {
+    position: absolute; top: 0; left: 4px;
+    background: #ffcc00; color: #000;
+    font-size: 10px; padding: 2px 5px; font-weight: bold;
+    border-radius: 0 3px 3px 0; white-space: nowrap;
+    cursor: grab;
+  }
+
+  .offset { color: #ffcc00; font-weight: bold; min-width: 90px; display: inline-block; }
+  .time { color: #ccc; font-family: monospace; }
+  button { background: #3a7bd5; color: white; border: 0; padding: 8px 14px; border-radius: 4px; cursor: pointer; }
+  button:hover { background: #2c66b7; }
+  button.secondary { background: #555; }
+  button.secondary:hover { background: #666; }
+  label { cursor: pointer; }
+  input[type="text"] {
+    background: #2a2a2a; color: #ddd; border: 1px solid #555;
+    padding: 6px 8px; border-radius: 4px; font: inherit;
+    width: 200px;
+  }
+  input[type="text"]:focus { outline: none; border-color: #3a7bd5; }
+</style>
+</head>
+<body>
+
+<div class="controls">
+  <label>Video: <input type="file" id="videoInput" accept="video/*"></label>
+  <label>Titulky (.srt): <input type="file" id="srtInput" accept=".srt"></label>
+  <span class="sep"></span>
+  <button id="back10Btn" class="secondary" title="←">⏪ -10 s</button>
+  <button id="fwd10Btn" class="secondary" title="→">+10 s ⏩</button>
+  <span class="sep"></span>
+  <span>Čas: <span class="time" id="timeDisplay">0:00.000</span></span>
+  <span>Posun: <span class="offset" id="offsetDisplay">0.000 s</span></span>
+  <button id="snapStartBtn" title="Srovná začátek prvního titulku se žlutou značkou">Přichytit začátek ke značce</button>
+  <button id="clearMarkerBtn" class="secondary">Smazat značku</button>
+  <button id="resetBtn" class="secondary">Reset posunu</button>
+  <span class="sep"></span>
+  <label>Název: <input type="text" id="filenameInput" placeholder="titulky_upravene" value="titulky_upravene"></label>
+  <button id="saveBtn">Uložit .srt</button>
+</div>
+
+<video id="video" controls></video>
+
+<div class="hint">
+  <b>Klik do prázdna v pásu</b> = položit žlutou značku &nbsp;•&nbsp;
+  <b>Tažení značky</b> = posunout ji po pásu &nbsp;•&nbsp;
+  <b>Klik na titulek</b> = přitáhnout ke značce (nebo k playheadu, pokud značka chybí) &nbsp;•&nbsp;
+  <b>Přichytit začátek</b> = srovná první titulek se žlutou značkou &nbsp;•&nbsp;
+  <b>Tažení pásu</b> = ruční posun celých titulků &nbsp;•&nbsp;
+  <b>Spodní lišta</b> = posouvání pásu &nbsp;•&nbsp;
+  <b>Mezerník</b> = play/pause &nbsp;•&nbsp;
+  <b>← / →</b> = ±10 s
+</div>
+
+<div class="timeline-wrapper" id="timelineWrapper">
+  <div class="timeline" id="timeline">
+    <div class="ruler" id="ruler"></div>
+    <div class="subs-track" id="subsTrack"></div>
+    <div class="marker" id="marker" hidden>
+      <div class="marker-hit" id="markerHit"></div>
+      <div class="marker-flag" id="markerFlag">0:00</div>
+    </div>
+    <div class="playhead" id="playhead"></div>
+  </div>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const timeline = document.getElementById('timeline');
+const ruler = document.getElementById('ruler');
+const subsTrack = document.getElementById('subsTrack');
+const wrapper = document.getElementById('timelineWrapper');
+const playhead = document.getElementById('playhead');
+const marker = document.getElementById('marker');
+const markerFlag = document.getElementById('markerFlag');
+const offsetDisplay = document.getElementById('offsetDisplay');
+const timeDisplay = document.getElementById('timeDisplay');
+
+const PX_PER_SECOND = 60;
+const DRAG_THRESHOLD = 5;
+const MAJOR_TICK = 5;
+
+let subtitles = [];
+let offsetSec = 0;
+let markerTime = null;
+
+let mouseDownOn = null;          // 'marker' | 'sub' | 'empty' | null
+let mouseDownTarget = null;
+let mouseDownX = 0;
+let dragMode = null;             // 'marker' | 'offset' | null
+let dragStartOffset = 0;
+let dragStartMarker = 0;
+
+function parseSrt(text) {
+  return text.replace(/\r/g, '').trim().split(/\n\n+/).map(block => {
+    const lines = block.split('\n');
+    const m = lines[1]?.match(/(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/);
+    if (!m) return null;
+    const toSec = (h, mi, s, ms) => +h * 3600 + +mi * 60 + +s + +ms / 1000;
+    return {
+      index: parseInt(lines[0], 10) || 0,
+      start: toSec(m[1], m[2], m[3], m[4]),
+      end:   toSec(m[5], m[6], m[7], m[8]),
+      text:  lines.slice(2).join('\n')
+    };
+  }).filter(Boolean);
+}
+
+function formatSrtTime(sec) {
+  if (sec < 0) sec = 0;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  const ms = Math.round((sec - Math.floor(sec)) * 1000);
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')},${String(ms).padStart(3,'0')}`;
+}
+
+function formatShort(sec) {
+  if (sec < 0) sec = 0;
+  const m = Math.floor(sec / 60);
+  const s = sec - m * 60;
+  return `${m}:${s.toFixed(3).padStart(6,'0')}`;
+}
+
+function formatRuler(sec) {
+  if (sec < 0) sec = 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+function buildSrt(subs, offset) {
+  return subs.map((s, i) =>
+    `${i + 1}\n${formatSrtTime(s.start + offset)} --> ${formatSrtTime(s.end + offset)}\n${s.text}`
+  ).join('\n\n') + '\n';
+}
+
+function renderRuler(totalSec) {
+  ruler.innerHTML = '';
+  for (let s = 0; s <= totalSec; s++) {
+    const isMajor = s % MAJOR_TICK === 0;
+    const tick = document.createElement('div');
+    tick.className = isMajor ? 'tick-major' : 'tick-minor';
+    tick.style.left = `${s * PX_PER_SECOND}px`;
+    ruler.appendChild(tick);
+    if (isMajor) {
+      const label = document.createElement('div');
+      label.className = 'tick-label';
+      label.style.left = `${s * PX_PER_SECOND}px`;
+      label.textContent = formatRuler(s);
+      ruler.appendChild(label);
+    }
+  }
+}
+
+function renderSubs() {
+  subsTrack.innerHTML = '';
+  for (let i = 0; i < subtitles.length; i++) {
+    const s = subtitles[i];
+    const block = document.createElement('div');
+    block.className = 'sub-block';
+    block.dataset.idx = i;
+    block.style.left = `${s.start * PX_PER_SECOND}px`;
+    block.style.width = `${Math.max(20, (s.end - s.start) * PX_PER_SECOND)}px`;
+    const preview = s.text.replace(/\n/g, ' • ');
+    block.title = `#${i + 1}  ${formatRuler(s.start)} → ${formatRuler(s.end)}\n${s.text}`;
+    block.textContent = preview;
+    subsTrack.appendChild(block);
+  }
+}
+
+function renderAll() {
+  const maxSub = subtitles.length ? Math.max(...subtitles.map(s => s.end)) : 0;
+  const maxVid = isFinite(video.duration) ? video.duration : 0;
+  const totalSec = Math.ceil(Math.max(maxSub, maxVid, 60) + 30);
+  timeline.style.width = `${totalSec * PX_PER_SECOND}px`;
+  renderRuler(totalSec);
+  renderSubs();
+  applyOffset();
+  updatePlayhead();
+  updateMarker();
+}
+
+function applyOffset() {
+  subsTrack.style.transform = `translateX(${offsetSec * PX_PER_SECOND}px)`;
+  const sign = offsetSec >= 0 ? '+' : '';
+  offsetDisplay.textContent = `${sign}${offsetSec.toFixed(3)} s`;
+}
+
+function updatePlayhead() {
+  const t = video.currentTime || 0;
+  playhead.style.left = `${t * PX_PER_SECOND}px`;
+}
+
+function updateMarker() {
+  if (markerTime === null) { marker.hidden = true; return; }
+  marker.hidden = false;
+  marker.style.left = `${markerTime * PX_PER_SECOND}px`;
+  markerFlag.textContent = formatRuler(markerTime);
+}
+
+function tick() {
+  const t = video.currentTime || 0;
+  updatePlayhead();
+  timeDisplay.textContent = formatShort(t);
+  // Auto-následování playheadu jen pokud video hraje a nic netáhneme
+  if (!video.paused && !dragMode) {
+    const visibleW = wrapper.clientWidth;
+    wrapper.scrollLeft = Math.max(0, t * PX_PER_SECOND - visibleW / 2);
+  }
+  requestAnimationFrame(tick);
+}
+
+document.getElementById('videoInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  video.src = URL.createObjectURL(file);
+  // předvyplnit název podle video souboru (bez přípony) — aby si .srt přehrávač
+  // automaticky napároval k videu
+  const baseName = file.name.replace(/\.[^.]+$/, '');
+  document.getElementById('filenameInput').value = baseName;
+});
+video.addEventListener('loadedmetadata', renderAll);
+
+document.getElementById('srtInput').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  subtitles = parseSrt(await file.text());
+  offsetSec = 0;
+  markerTime = null;
+  // předvyplnit název jen pokud ještě nemáme video (to má přednost)
+  if (!video.src) {
+    const baseName = file.name.replace(/\.srt$/i, '');
+    document.getElementById('filenameInput').value = `${baseName}_upravene`;
+  }
+  renderAll();
+});
+
+function timeAtClientX(clientX) {
+  const rect = wrapper.getBoundingClientRect();
+  return Math.max(0, (clientX - rect.left + wrapper.scrollLeft) / PX_PER_SECOND);
+}
+
+// Drag značky — mousedown na ní zachytí drag, nezmizí
+marker.addEventListener('mousedown', e => {
+  e.stopPropagation();
+  e.preventDefault();
+  mouseDownOn = 'marker';
+  mouseDownX = e.clientX;
+  dragStartMarker = markerTime;
+});
+
+// Ostatní interakce uvnitř pásu
+wrapper.addEventListener('mousedown', e => {
+  if (mouseDownOn) return;
+  if (!subtitles.length) return;
+  // Ignoruj kliky mimo timeline (scrollbar, prázdná oblast wrapperu)
+  if (!e.target.closest('#timeline')) return;
+  const t = e.target;
+  mouseDownTarget = t;
+  mouseDownX = e.clientX;
+  mouseDownOn = t.classList.contains('sub-block') ? 'sub' : 'empty';
+  dragStartOffset = offsetSec;
+});
+
+window.addEventListener('mousemove', e => {
+  if (!mouseDownOn) return;
+  const dx = e.clientX - mouseDownX;
+  if (!dragMode && Math.abs(dx) > DRAG_THRESHOLD) {
+    dragMode = (mouseDownOn === 'marker') ? 'marker' : 'offset';
+    document.body.classList.add('grabbing');
+    if (dragMode === 'offset') wrapper.classList.add('dragging');
+  }
+  if (dragMode === 'marker') {
+    markerTime = Math.max(0, dragStartMarker + dx / PX_PER_SECOND);
+    updateMarker();
+  } else if (dragMode === 'offset') {
+    offsetSec = dragStartOffset + dx / PX_PER_SECOND;
+    applyOffset();
+  }
+});
+
+window.addEventListener('mouseup', e => {
+  if (!mouseDownOn) return;
+  const wasDragging = !!dragMode;
+  const downOn = mouseDownOn;
+  const target = mouseDownTarget;
+  mouseDownOn = null;
+  mouseDownTarget = null;
+  dragMode = null;
+  document.body.classList.remove('grabbing');
+  wrapper.classList.remove('dragging');
+  if (wasDragging) return;
+
+  // Klik bez tažení
+  if (downOn === 'marker') {
+    // nedělej nic — značku zachováme
+    return;
+  }
+  if (downOn === 'sub') {
+    const idx = parseInt(target.dataset.idx, 10);
+    const sub = subtitles[idx];
+    const anchor = (markerTime !== null) ? markerTime : video.currentTime;
+    offsetSec = anchor - sub.start;
+    applyOffset();
+    return;
+  }
+  // klik do prázdna — polož / přesuň značku
+  markerTime = timeAtClientX(e.clientX);
+  updateMarker();
+});
+
+document.getElementById('back10Btn').addEventListener('click', () => {
+  video.currentTime = Math.max(0, video.currentTime - 10);
+});
+document.getElementById('fwd10Btn').addEventListener('click', () => {
+  const dur = video.duration || Infinity;
+  video.currentTime = Math.min(dur, video.currentTime + 10);
+});
+
+window.addEventListener('keydown', e => {
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (video.paused) video.play(); else video.pause();
+  } else if (e.code === 'ArrowLeft') {
+    e.preventDefault();
+    video.currentTime = Math.max(0, video.currentTime - 10);
+  } else if (e.code === 'ArrowRight') {
+    e.preventDefault();
+    const dur = video.duration || Infinity;
+    video.currentTime = Math.min(dur, video.currentTime + 10);
+  }
+});
+
+document.getElementById('snapStartBtn').addEventListener('click', () => {
+  if (!subtitles.length) { alert('Nejprve načti .srt'); return; }
+  if (markerTime === null) { alert('Nejprve polož žlutou značku v pásu (klikni do prázdna v pásu).'); return; }
+  offsetSec = markerTime - subtitles[0].start;
+  applyOffset();
+});
+
+document.getElementById('clearMarkerBtn').addEventListener('click', () => {
+  markerTime = null;
+  updateMarker();
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  offsetSec = 0;
+  applyOffset();
+});
+
+document.getElementById('saveBtn').addEventListener('click', () => {
+  if (!subtitles.length) { alert('Nejprve načti .srt'); return; }
+  let name = document.getElementById('filenameInput').value.trim() || 'titulky_upravene';
+  // odstranit neplatné znaky pro název souboru
+  name = name.replace(/[\\/:*?"<>|]/g, '_');
+  if (!/\.srt$/i.test(name)) name += '.srt';
+  const blob = new Blob([buildSrt(subtitles, offsetSec)], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+});
+
+requestAnimationFrame(tick);
+</script>
+
+</body>
+</html>
