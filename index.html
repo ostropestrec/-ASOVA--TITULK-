@@ -155,9 +155,8 @@
   <span class="sep"></span>
   <span>Čas: <span class="time" id="timeDisplay">0:00.000</span></span>
   <span>Posun: <span class="offset" id="offsetDisplay">0.000 s</span></span>
-  <label>Natažení: <input type="number" id="factorInput" min="1" max="500" step="0.01" value="100"> %</label>
+  <label title="Posune poslední titulek o tolik sekund (kladné = později, záporné = dřív). První titulek zůstane na místě, mezilehlé se rozprostřou proporcionálně.">Natáhnout o: <input type="number" id="stretchInput" step="0.1" value="0"> s</label>
   <button id="snapStartBtn" title="Srovná začátek prvního titulku se žlutou značkou">Přichytit začátek ke značce</button>
-  <button id="snapEndBtn" title="Srovná poslední titulek se žlutou značkou (proporcionálně natáhne všechny mezi)">Přichytit konec ke značce</button>
   <button id="clearMarkerBtn" class="secondary">Smazat značku</button>
   <button id="resetBtn" class="secondary">Reset úprav</button>
   <span class="sep"></span>
@@ -181,7 +180,8 @@
   <b>Klik do prázdna v pásu</b> = položit žlutou značku &nbsp;•&nbsp;
   <b>Tažení značky</b> = posunout ji po pásu &nbsp;•&nbsp;
   <b>Klik na titulek</b> = přitáhnout ke značce (nebo k playheadu, pokud značka chybí) &nbsp;•&nbsp;
-  <b>Přichytit začátek/konec</b> = srovná první/poslední titulek se žlutou značkou (konec dvoubodově natáhne mezilehlé titulky) &nbsp;•&nbsp;
+  <b>Přichytit začátek</b> = srovná první titulek se žlutou značkou &nbsp;•&nbsp;
+  <b>Natáhnout o</b> = proporcionálně natáhne titulky (kladné číslo zpomalí konec, záporné zrychlí) &nbsp;•&nbsp;
   <b>Tažení pásu</b> = ruční posun celých titulků &nbsp;•&nbsp;
   <b>Spodní lišta</b> = posouvání pásu &nbsp;•&nbsp;
   <b>Mezerník</b> = play/pause &nbsp;•&nbsp;
@@ -330,11 +330,20 @@ function applyOffset() {
   offsetDisplay.textContent = `${sign}${offsetSec.toFixed(3)} s`;
 }
 
+// Natažení v sekundách = o kolik se posune poslední titulek vůči prvnímu
+// (relativně k původnímu rozpětí mezi prvním a posledním titulkem).
+function getStretchSec() {
+  if (subtitles.length < 2) return 0;
+  const span = subtitles[subtitles.length - 1].start - subtitles[0].start;
+  if (span < 0.001) return 0;
+  return (factorScale - 1) * span;
+}
+
 function updateFactorInput() {
   // jen zobrazení — neaktualizujeme, pokud uživatel právě píše do toho samého pole
-  const el = document.getElementById('factorInput');
+  const el = document.getElementById('stretchInput');
   if (document.activeElement !== el) {
-    el.value = (factorScale * 100).toFixed(3);
+    el.value = getStretchSec().toFixed(3);
   }
 }
 
@@ -539,33 +548,28 @@ document.getElementById('snapStartBtn').addEventListener('click', () => {
   applyOffset();
 });
 
-document.getElementById('snapEndBtn').addEventListener('click', () => {
-  if (subtitles.length < 2) { alert('Pro natažení potřebuji alespoň dva titulky.'); return; }
-  if (markerTime === null) { alert('Nejprve polož žlutou značku v pásu na místo, kde má skončit poslední titulek.'); return; }
+// Manuální natažení v sekundách: o kolik se posune poslední titulek vůči prvnímu.
+// První titulek zůstane na své současné pozici, mezilehlé se rozprostřou proporcionálně.
+document.getElementById('stretchInput').addEventListener('change', () => {
+  const el = document.getElementById('stretchInput');
+  if (subtitles.length < 2) { updateFactorInput(); return; }
+  const x = parseFloat(el.value);
+  if (!isFinite(x)) { updateFactorInput(); return; }
   const s0 = subtitles[0].start;
   const sN = subtitles[subtitles.length - 1].start;
-  if (sN - s0 < 0.001) { alert('První a poslední titulek mají téměř stejný čas — natažení nelze spočítat.'); return; }
-  // současná pozice prvního titulku (chceme ji zachovat)
+  const span = sN - s0;
+  if (span < 0.001) { updateFactorInput(); return; }
+  // zachovat současnou pozici prvního titulku
   const currentFirst = s0 * factorScale + offsetSec;
-  // odvození nového faktoru a offsetu ze soustavy:
-  //   f' * s0 + o' = currentFirst   (první titulek se nepohne)
-  //   f' * sN + o' = markerTime     (poslední titulek na značku)
-  const newFactor = (markerTime - currentFirst) / (sN - s0);
-  if (newFactor <= 0) { alert('Značka je před prvním titulkem — natažení by bylo záporné. Polož ji dál.'); return; }
-  const newOffset = currentFirst - newFactor * s0;
-  factorScale = newFactor;
-  offsetSec = newOffset;
-  applyFactorChange();
-});
-
-// Manuální zadání natažení (v procentech)
-document.getElementById('factorInput').addEventListener('change', () => {
-  const v = parseFloat(document.getElementById('factorInput').value);
-  if (!isFinite(v) || v <= 0) {
+  const newFactor = 1 + x / span;
+  if (newFactor <= 0) {
+    alert('Tato hodnota by způsobila záporné natažení (titulky by šly pozpátku). Zadej menší absolutní hodnotu.');
     updateFactorInput();
     return;
   }
-  factorScale = v / 100;
+  const newOffset = currentFirst - newFactor * s0;
+  factorScale = newFactor;
+  offsetSec = newOffset;
   applyFactorChange();
 });
 
