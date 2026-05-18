@@ -14,10 +14,22 @@
 
   .video-wrap { position: relative; background: black; }
   .video-container { position: relative; }
-  .video-wrap:fullscreen { display: flex; flex-direction: column; background: black; }
-  .video-wrap:fullscreen .video-container { flex: 1; min-height: 0; }
+  .video-wrap:fullscreen { background: black; cursor: none; }
+  .video-wrap:fullscreen.show-controls { cursor: default; }
+  .video-wrap:fullscreen .video-container { position: absolute; inset: 0; }
   .video-wrap:fullscreen video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
-  .video-wrap:fullscreen .player-bar { border: 0; }
+  .video-wrap:fullscreen .player-bar {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: linear-gradient(to top, rgba(0,0,0,0.9), rgba(0,0,0,0));
+    padding: 50px 24px 16px 24px;
+    border: 0;
+    transform: translateY(100%); opacity: 0;
+    transition: transform 0.25s ease, opacity 0.25s ease;
+    z-index: 20;
+  }
+  .video-wrap:fullscreen.show-controls .player-bar {
+    transform: translateY(0); opacity: 1;
+  }
   .subtitle-overlay {
     position: absolute; left: 0; right: 0; bottom: 8%;
     text-align: center; pointer-events: none;
@@ -79,6 +91,17 @@
     content: ''; position: absolute; top: 100%; left: 50%;
     margin-left: -4px; border: 4px solid transparent;
     border-top-color: #ffcc00;
+  }
+  .volume-group { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .volume-slider {
+    position: relative; width: 80px; height: 6px;
+    background: #1a1a1a; border-radius: 3px;
+    cursor: pointer;
+  }
+  .volume-fill {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: #3a7bd5; border-radius: 3px;
+    pointer-events: none;
   }
 
   .hint { font-size: 12px; color: #888; margin: 6px 0 4px; line-height: 1.6; }
@@ -205,6 +228,12 @@
       <div class="seekbar-fill" id="seekFill"></div>
       <div class="seekbar-line" id="seekLine"></div>
       <div class="seekbar-tooltip" id="seekTooltip" hidden>0:00</div>
+    </div>
+    <div class="volume-group">
+      <button id="muteBtn" class="play-btn" title="Ztlumit">🔊</button>
+      <div class="volume-slider" id="volumeSlider">
+        <div class="volume-fill" id="volumeFill"></div>
+      </div>
     </div>
     <button id="fullscreenBtn" class="play-btn" title="Fullscreen">⛶</button>
   </div>
@@ -771,6 +800,82 @@ fullscreenBtn.addEventListener('click', () => {
   // fullscreen wrapper (ne jen video) — aby šel titulkový overlay vidět i ve fullscreenu
   else document.getElementById('videoWrap').requestFullscreen();
 });
+
+// === Ovládání hlasitosti ===
+const muteBtn = document.getElementById('muteBtn');
+const volumeSlider = document.getElementById('volumeSlider');
+const volumeFill = document.getElementById('volumeFill');
+let volumeDragging = false;
+
+function updateVolumeDisplay() {
+  const eff = video.muted ? 0 : video.volume;
+  volumeFill.style.width = `${eff * 100}%`;
+  if (video.muted || video.volume === 0) muteBtn.textContent = '🔇';
+  else if (video.volume < 0.5) muteBtn.textContent = '🔉';
+  else muteBtn.textContent = '🔊';
+}
+function setVolumeFromX(clientX) {
+  const rect = volumeSlider.getBoundingClientRect();
+  const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+  video.volume = rect.width > 0 ? x / rect.width : 0;
+  video.muted = false;
+}
+volumeSlider.addEventListener('mousedown', e => {
+  e.preventDefault();
+  e.stopPropagation();
+  volumeDragging = true;
+  setVolumeFromX(e.clientX);
+});
+window.addEventListener('mousemove', e => {
+  if (!volumeDragging) return;
+  setVolumeFromX(e.clientX);
+});
+window.addEventListener('mouseup', () => { volumeDragging = false; });
+muteBtn.addEventListener('click', () => { video.muted = !video.muted; });
+video.addEventListener('volumechange', updateVolumeDisplay);
+updateVolumeDisplay();
+
+// === Auto-hide ovládací lišty ve fullscreenu ===
+const videoWrapEl = document.getElementById('videoWrap');
+const playerBarEl = document.querySelector('.player-bar');
+let hideControlsTimer = null;
+let mouseOverBar = false;
+const HIDE_DELAY_MS = 2500;
+
+function inFullscreen() {
+  return document.fullscreenElement === videoWrapEl;
+}
+function showFullscreenControls() {
+  videoWrapEl.classList.add('show-controls');
+  clearTimeout(hideControlsTimer);
+  if (!video.paused && !mouseOverBar) {
+    hideControlsTimer = setTimeout(() => {
+      videoWrapEl.classList.remove('show-controls');
+    }, HIDE_DELAY_MS);
+  }
+}
+
+document.addEventListener('fullscreenchange', () => {
+  if (inFullscreen()) {
+    showFullscreenControls();
+  } else {
+    videoWrapEl.classList.remove('show-controls');
+    clearTimeout(hideControlsTimer);
+  }
+});
+videoWrapEl.addEventListener('mousemove', () => {
+  if (inFullscreen()) showFullscreenControls();
+});
+playerBarEl.addEventListener('mouseenter', () => {
+  mouseOverBar = true;
+  clearTimeout(hideControlsTimer);
+});
+playerBarEl.addEventListener('mouseleave', () => {
+  mouseOverBar = false;
+  if (inFullscreen()) showFullscreenControls();
+});
+video.addEventListener('pause', () => { if (inFullscreen()) showFullscreenControls(); });
+video.addEventListener('play', () => { if (inFullscreen()) showFullscreenControls(); });
 
 // Nové buttony přidané po DOMContentLoaded — registruj jim také mousedown.preventDefault
 // (aby při kliknutí nepřebíraly focus a klávesnice fungovala dál).
