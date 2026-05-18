@@ -134,12 +134,13 @@
   button.secondary { background: #555; }
   button.secondary:hover { background: #666; }
   label { cursor: pointer; }
-  input[type="text"] {
+  input[type="text"], input[type="number"] {
     background: #2a2a2a; color: #ddd; border: 1px solid #555;
     padding: 6px 8px; border-radius: 4px; font: inherit;
-    width: 200px;
   }
-  input[type="text"]:focus { outline: none; border-color: #3a7bd5; }
+  input[type="text"] { width: 200px; }
+  input[type="number"] { width: 60px; }
+  input[type="text"]:focus, input[type="number"]:focus { outline: none; border-color: #3a7bd5; }
 </style>
 </head>
 <body>
@@ -148,14 +149,17 @@
   <label>Video: <input type="file" id="videoInput" accept="video/*"></label>
   <label>Titulky (.srt): <input type="file" id="srtInput" accept=".srt"></label>
   <span class="sep"></span>
-  <button id="back10Btn" class="secondary" title="←">⏪ -2 s</button>
-  <button id="fwd10Btn" class="secondary" title="→">+2 s ⏩</button>
+  <button id="back10Btn" class="secondary" title="←">⏪ -<span id="stepLabelBack">2</span> s</button>
+  <button id="fwd10Btn" class="secondary" title="→">+<span id="stepLabelFwd">2</span> s ⏩</button>
+  <label>Přetáčet: <input type="number" id="stepInput" min="0.1" step="0.1" value="2"> s</label>
   <span class="sep"></span>
   <span>Čas: <span class="time" id="timeDisplay">0:00.000</span></span>
   <span>Posun: <span class="offset" id="offsetDisplay">0.000 s</span></span>
+  <label>Natažení: <input type="number" id="factorInput" min="1" max="500" step="0.01" value="100"> %</label>
   <button id="snapStartBtn" title="Srovná začátek prvního titulku se žlutou značkou">Přichytit začátek ke značce</button>
+  <button id="snapEndBtn" title="Srovná poslední titulek se žlutou značkou (proporcionálně natáhne všechny mezi)">Přichytit konec ke značce</button>
   <button id="clearMarkerBtn" class="secondary">Smazat značku</button>
-  <button id="resetBtn" class="secondary">Reset posunu</button>
+  <button id="resetBtn" class="secondary">Reset úprav</button>
   <span class="sep"></span>
   <label>Název: <input type="text" id="filenameInput" placeholder="titulky_upravene" value="titulky_upravene"></label>
   <button id="saveBtn">Uložit .srt</button>
@@ -177,11 +181,11 @@
   <b>Klik do prázdna v pásu</b> = položit žlutou značku &nbsp;•&nbsp;
   <b>Tažení značky</b> = posunout ji po pásu &nbsp;•&nbsp;
   <b>Klik na titulek</b> = přitáhnout ke značce (nebo k playheadu, pokud značka chybí) &nbsp;•&nbsp;
-  <b>Přichytit začátek</b> = srovná první titulek se žlutou značkou &nbsp;•&nbsp;
+  <b>Přichytit začátek/konec</b> = srovná první/poslední titulek se žlutou značkou (konec dvoubodově natáhne mezilehlé titulky) &nbsp;•&nbsp;
   <b>Tažení pásu</b> = ruční posun celých titulků &nbsp;•&nbsp;
   <b>Spodní lišta</b> = posouvání pásu &nbsp;•&nbsp;
   <b>Mezerník</b> = play/pause &nbsp;•&nbsp;
-  <b>← / →</b> = ±2 s
+  <b>← / →</b> = ±<span id="stepLabelHint">2</span> s
 </div>
 
 <div class="timeline-wrapper" id="timelineWrapper">
@@ -213,7 +217,8 @@ const DRAG_THRESHOLD = 5;
 const MAJOR_TICK = 5;
 
 let subtitles = [];
-let offsetSec = 0;
+let offsetSec = 0;       // additivní posun (sekundy)
+let factorScale = 1;     // multiplikativní natažení (1 = beze změny, 1.01 = +1 %)
 let markerTime = null;
 
 let mouseDownOn = null;          // 'marker' | 'sub' | 'empty' | null
@@ -261,9 +266,9 @@ function formatRuler(sec) {
   return `${m}:${String(s).padStart(2,'0')}`;
 }
 
-function buildSrt(subs, offset) {
+function buildSrt(subs, offset, factor) {
   return subs.map((s, i) =>
-    `${i + 1}\n${formatSrtTime(s.start + offset)} --> ${formatSrtTime(s.end + offset)}\n${s.text}`
+    `${i + 1}\n${formatSrtTime(s.start * factor + offset)} --> ${formatSrtTime(s.end * factor + offset)}\n${s.text}`
   ).join('\n\n') + '\n';
 }
 
@@ -289,11 +294,14 @@ function renderSubs() {
   subsTrack.innerHTML = '';
   for (let i = 0; i < subtitles.length; i++) {
     const s = subtitles[i];
+    // pozice a šířka zohledňují natažení (factor); offset je aplikovaný na celý track přes transform
+    const stStart = s.start * factorScale;
+    const stEnd = s.end * factorScale;
     const block = document.createElement('div');
     block.className = 'sub-block';
     block.dataset.idx = i;
-    block.style.left = `${s.start * PX_PER_SECOND}px`;
-    block.style.width = `${Math.max(20, (s.end - s.start) * PX_PER_SECOND)}px`;
+    block.style.left = `${stStart * PX_PER_SECOND}px`;
+    block.style.width = `${Math.max(20, (stEnd - stStart) * PX_PER_SECOND)}px`;
     const preview = s.text.replace(/\n/g, ' • ');
     block.title = `#${i + 1}  ${formatRuler(s.start)} → ${formatRuler(s.end)}\n${s.text}`;
     block.textContent = preview;
@@ -304,11 +312,14 @@ function renderSubs() {
 function renderAll() {
   const maxSub = subtitles.length ? Math.max(...subtitles.map(s => s.end)) : 0;
   const maxVid = isFinite(video.duration) ? video.duration : 0;
-  const totalSec = Math.ceil(Math.max(maxSub, maxVid, 60) + 30);
+  // pás musí mít rezervu i pro natažené titulky a velký offset
+  const stretchedMax = maxSub * Math.max(1, factorScale) + Math.max(0, offsetSec);
+  const totalSec = Math.ceil(Math.max(stretchedMax, maxVid, 60) + 60);
   timeline.style.width = `${totalSec * PX_PER_SECOND}px`;
   renderRuler(totalSec);
   renderSubs();
   applyOffset();
+  updateFactorInput();
   updatePlayhead();
   updateMarker();
 }
@@ -317,6 +328,29 @@ function applyOffset() {
   subsTrack.style.transform = `translateX(${offsetSec * PX_PER_SECOND}px)`;
   const sign = offsetSec >= 0 ? '+' : '';
   offsetDisplay.textContent = `${sign}${offsetSec.toFixed(3)} s`;
+}
+
+function updateFactorInput() {
+  // jen zobrazení — neaktualizujeme, pokud uživatel právě píše do toho samého pole
+  const el = document.getElementById('factorInput');
+  if (document.activeElement !== el) {
+    el.value = (factorScale * 100).toFixed(3);
+  }
+}
+
+function applyFactorChange() {
+  // natažení změnilo pozice i šířky bloků → překreslit
+  renderSubs();
+  // a možná i šířku pásu, kdyby titulky přesáhly současný timeline
+  const maxSub = subtitles.length ? Math.max(...subtitles.map(s => s.end)) : 0;
+  const stretchedMax = maxSub * Math.max(1, factorScale) + Math.max(0, offsetSec);
+  const totalSec = Math.ceil(Math.max(stretchedMax, video.duration || 0, 60) + 60);
+  if (parseInt(timeline.style.width, 10) < totalSec * PX_PER_SECOND) {
+    timeline.style.width = `${totalSec * PX_PER_SECOND}px`;
+    renderRuler(totalSec);
+  }
+  applyOffset();
+  updateFactorInput();
 }
 
 function updatePlayhead() {
@@ -360,6 +394,7 @@ document.getElementById('srtInput').addEventListener('change', async e => {
   if (!file) return;
   subtitles = parseSrt(await file.text());
   offsetSec = 0;
+  factorScale = 1;
   markerTime = null;
   // předvyplnit název jen pokud ještě nemáme video (to má přednost)
   if (!video.src) {
@@ -435,7 +470,8 @@ window.addEventListener('mouseup', e => {
     const idx = parseInt(target.dataset.idx, 10);
     const sub = subtitles[idx];
     const anchor = (markerTime !== null) ? markerTime : video.currentTime;
-    offsetSec = anchor - sub.start;
+    // jen offset, natažení necháváme — zarovnává konkrétní titulek bez deformace
+    offsetSec = anchor - sub.start * factorScale;
     applyOffset();
     return;
   }
@@ -444,12 +480,25 @@ window.addEventListener('mouseup', e => {
   updateMarker();
 });
 
+function getStepSeconds() {
+  const v = parseFloat(document.getElementById('stepInput').value);
+  return (isFinite(v) && v > 0) ? v : 2;
+}
+function updateStepLabels() {
+  const text = String(getStepSeconds()).replace('.', ',');
+  document.getElementById('stepLabelBack').textContent = text;
+  document.getElementById('stepLabelFwd').textContent = text;
+  document.getElementById('stepLabelHint').textContent = text;
+}
+document.getElementById('stepInput').addEventListener('input', updateStepLabels);
+updateStepLabels();
+
 document.getElementById('back10Btn').addEventListener('click', () => {
-  video.currentTime = Math.max(0, video.currentTime - 2);
+  video.currentTime = Math.max(0, video.currentTime - getStepSeconds());
 });
 document.getElementById('fwd10Btn').addEventListener('click', () => {
   const dur = video.duration || Infinity;
-  video.currentTime = Math.min(dur, video.currentTime + 2);
+  video.currentTime = Math.min(dur, video.currentTime + getStepSeconds());
 });
 
 // Klávesové zkratky — v capture fázi dokumentu, aby se zachytily dřív, než
@@ -467,12 +516,12 @@ document.addEventListener('keydown', e => {
   } else if (e.code === 'ArrowLeft') {
     e.preventDefault();
     e.stopPropagation();
-    video.currentTime = Math.max(0, video.currentTime - 2);
+    video.currentTime = Math.max(0, video.currentTime - getStepSeconds());
   } else if (e.code === 'ArrowRight') {
     e.preventDefault();
     e.stopPropagation();
     const dur = video.duration || Infinity;
-    video.currentTime = Math.min(dur, video.currentTime + 2);
+    video.currentTime = Math.min(dur, video.currentTime + getStepSeconds());
   }
 }, true);
 
@@ -485,8 +534,39 @@ document.querySelectorAll('button').forEach(btn => {
 document.getElementById('snapStartBtn').addEventListener('click', () => {
   if (!subtitles.length) { alert('Nejprve načti .srt'); return; }
   if (markerTime === null) { alert('Nejprve polož žlutou značku v pásu (klikni do prázdna v pásu).'); return; }
-  offsetSec = markerTime - subtitles[0].start;
+  // přichytí první titulek na značku, zachová natažení
+  offsetSec = markerTime - subtitles[0].start * factorScale;
   applyOffset();
+});
+
+document.getElementById('snapEndBtn').addEventListener('click', () => {
+  if (subtitles.length < 2) { alert('Pro natažení potřebuji alespoň dva titulky.'); return; }
+  if (markerTime === null) { alert('Nejprve polož žlutou značku v pásu na místo, kde má skončit poslední titulek.'); return; }
+  const s0 = subtitles[0].start;
+  const sN = subtitles[subtitles.length - 1].start;
+  if (sN - s0 < 0.001) { alert('První a poslední titulek mají téměř stejný čas — natažení nelze spočítat.'); return; }
+  // současná pozice prvního titulku (chceme ji zachovat)
+  const currentFirst = s0 * factorScale + offsetSec;
+  // odvození nového faktoru a offsetu ze soustavy:
+  //   f' * s0 + o' = currentFirst   (první titulek se nepohne)
+  //   f' * sN + o' = markerTime     (poslední titulek na značku)
+  const newFactor = (markerTime - currentFirst) / (sN - s0);
+  if (newFactor <= 0) { alert('Značka je před prvním titulkem — natažení by bylo záporné. Polož ji dál.'); return; }
+  const newOffset = currentFirst - newFactor * s0;
+  factorScale = newFactor;
+  offsetSec = newOffset;
+  applyFactorChange();
+});
+
+// Manuální zadání natažení (v procentech)
+document.getElementById('factorInput').addEventListener('change', () => {
+  const v = parseFloat(document.getElementById('factorInput').value);
+  if (!isFinite(v) || v <= 0) {
+    updateFactorInput();
+    return;
+  }
+  factorScale = v / 100;
+  applyFactorChange();
 });
 
 document.getElementById('clearMarkerBtn').addEventListener('click', () => {
@@ -496,7 +576,8 @@ document.getElementById('clearMarkerBtn').addEventListener('click', () => {
 
 document.getElementById('resetBtn').addEventListener('click', () => {
   offsetSec = 0;
-  applyOffset();
+  factorScale = 1;
+  applyFactorChange();
 });
 
 document.getElementById('saveBtn').addEventListener('click', () => {
@@ -505,7 +586,7 @@ document.getElementById('saveBtn').addEventListener('click', () => {
   // odstranit neplatné znaky pro název souboru
   name = name.replace(/[\\/:*?"<>|]/g, '_');
   if (!/\.srt$/i.test(name)) name += '.srt';
-  const blob = new Blob([buildSrt(subtitles, offsetSec)], { type: 'text/plain;charset=utf-8' });
+  const blob = new Blob([buildSrt(subtitles, offsetSec, factorScale)], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
