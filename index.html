@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <title>Časovač titulků</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='10' fill='%23000'/%3E%3C/svg%3E">
+<!-- ffmpeg.wasm via CDN (UMD build) — defer aby neblokovaly načítání HTML -->
+<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js" defer></script>
+<script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js" defer></script>
 <style>
   body { font-family: sans-serif; background: #1e1e1e; color: #ddd; margin: 0; padding: 16px; }
   body.grabbing, body.grabbing * { cursor: grabbing !important; }
@@ -215,6 +218,39 @@
   input[type="text"] { width: 200px; }
   input[type="number"] { width: 60px; }
   input[type="text"]:focus, input[type="number"]:focus { outline: none; border-color: #3a7bd5; }
+
+  .conversion-progress {
+    margin: 12px 0;
+    padding: 14px 16px;
+    background: #2a2a2a;
+    border: 1px solid #555;
+    border-radius: 6px;
+  }
+  .conversion-progress[hidden] { display: none; }
+  .conversion-progress-info {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13px; color: #ddd; margin-bottom: 8px;
+  }
+  .conversion-progress-info #progressText { font-weight: bold; }
+  .conversion-progress-info #progressPercent {
+    font-family: monospace; color: #ffcc00; font-weight: bold;
+  }
+  .conversion-progress-bar-wrap {
+    height: 10px;
+    background: #1a1a1a;
+    border-radius: 5px;
+    overflow: hidden;
+    position: relative;
+  }
+  .conversion-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #3a7bd5 0%, #4eda90 100%);
+    width: 0%;
+    transition: width 0.3s ease;
+  }
+  .conversion-progress-hint {
+    font-size: 11px; color: #888; margin-top: 8px; line-height: 1.4;
+  }
 </style>
 </head>
 <body>
@@ -241,6 +277,19 @@
   <div class="break"></div>
   <label>Název: <input type="text" id="filenameInput" placeholder="titulky_upravene" value="titulky_upravene"></label>
   <button id="saveBtn">Uložit .srt</button>
+</div>
+
+<div class="conversion-progress" id="conversionProgress" hidden>
+  <div class="conversion-progress-info">
+    <span id="progressText">Připravuji konverzi…</span>
+    <span id="progressPercent">0 %</span>
+  </div>
+  <div class="conversion-progress-bar-wrap">
+    <div class="conversion-progress-bar" id="progressBar"></div>
+  </div>
+  <div class="conversion-progress-hint">
+    Soubor se konvertuje přímo ve tvém prohlížeči (nikam se nenahrává). .mkv a podobné formáty se přebalí na .mp4 a 5.1 audio se převede na stereo, aby prohlížeč mohl přehrát.
+  </div>
 </div>
 
 <div class="video-wrap" id="videoWrap">
@@ -519,15 +568,190 @@ function invalidateSubtitleOverlay() {
   updateSubtitleOverlay(video.currentTime || 0);
 }
 
-document.getElementById('videoInput').addEventListener('change', e => {
-  const file = e.target.files[0];
-  if (!file) return;
-  video.src = URL.createObjectURL(file);
-  // předvyplnit název podle video souboru (bez přípony) — aby si .srt přehrávač
-  // automaticky napároval k videu
+// === ffmpeg.wasm integrace ===
+// Lazy-loaded singleton. Core (~30 MB) se stáhne až při první konverzi a pak je cachovaný.
+let ffmpegInstance = null;
+let ffmpegLoadingPromise = null;
+let conversionInProgress = false;
+
+// Tyto formáty prohlížeč typicky umí přehrát nativně; ostatní pošleme přes ffmpeg.
+const NATIVE_VIDEO_FORMATS = ['mp4', 'm4v', 'mov', 'webm'];
+
+function fileExtension(file) {
+  const m = file.name.toLowerCase().match(/\.([^.]+)$/);
+  return m ? m[1] : '';
+}
+
+function needsConversion(file) {
+  return !NATIVE_VIDEO_FORMATS.includes(fileExtension(file));
+}
+
+async function getFfmpeg() {
+  if (ffmpegInstance) return ffmpegInstance;
+  if (ffmpegLoadingPromise) return ffmpegLoadingPromise;
+
+  if (typeof FFmpegWASM === 'undefined' || typeof FFmpegUtil === 'undefined') {
+    throw new Error('Knihovny ffmpeg se nestáhly z CDN. Zkontroluj připojení k internetu a obnov stránku.');
+  }
+
+  ffmpegLoadingPromise = (async () => {
+    const { FFmpeg } = FFmpegWASM;
+    const { toBlobURL } = FFmpegUtil;
+    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+
+    const ffmpeg = new FFmpeg();
+    // Pro debug můžeš odkomentovat:
+    // ffmpeg.on('log', ({ message }) => console.log('[ffmpeg]', message));
+
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+    });
+    ffmpegInstance = ffmpeg;
+    return ffmpeg;
+  })();
+
+  try {
+    return await ffmpegLoadingPromise;
+  } catch (err) {
+    ffmpegLoadingPromise = null; // umožní pokus o opakované načtení
+    throw err;
+  }
+}
+
+async function convertFile(file, callbacks = {}) {
+  const { onLoading, onReading, onConverting, onProgress, onFinalizing } = callbacks;
+
+  onLoading?.();
+  const ffmpeg = await getFfmpeg();
+  const { fetchFile } = FFmpegUtil;
+
+  onReading?.();
+  const ext = fileExtension(file) || 'mkv';
+  const inputName = 'input.' + ext;
+  const outputName = 'output.mp4';
+
+  await ffmpeg.writeFile(inputName, await fetchFile(file));
+
+  onConverting?.();
+  const progressHandler = ({ progress }) => {
+    if (typeof progress === 'number' && !isNaN(progress)) {
+      onProgress?.(Math.max(0, Math.min(1, progress)));
+    }
+  };
+  ffmpeg.on('progress', progressHandler);
+
+  try {
+    // -c:v copy = jen přebalit video stream (rychlé, bez ztráty kvality)
+    // -c:a aac -ac 2 = převést audio na stereo AAC (řeší ztrátu dialogů u 5.1)
+    // -movflags +faststart = metadata na začátek pro rychlý start přehrávání
+    await ffmpeg.exec([
+      '-i', inputName,
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-ac', '2',
+      '-ar', '48000',
+      '-b:a', '192k',
+      '-movflags', '+faststart',
+      outputName,
+    ]);
+  } finally {
+    ffmpeg.off('progress', progressHandler);
+  }
+
+  onFinalizing?.();
+  const data = await ffmpeg.readFile(outputName);
+
+  // úklid ffmpeg virtuálního filesystému (uvolnění paměti)
+  try { await ffmpeg.deleteFile(inputName); } catch {}
+  try { await ffmpeg.deleteFile(outputName); } catch {}
+
+  return new Blob([data.buffer], { type: 'video/mp4' });
+}
+
+async function loadVideoFile(file) {
+  // Předvyplnit název podle video souboru (bez přípony)
   const baseName = file.name.replace(/\.[^.]+$/, '');
   document.getElementById('filenameInput').value = baseName;
+
+  // Kompatibilní formát → přehrát přímo, bez ffmpeg
+  if (!needsConversion(file)) {
+    video.src = URL.createObjectURL(file);
+    return;
+  }
+
+  // Velký soubor — soft warning (limit ~2 GB v paměti prohlížeče)
+  const sizeGb = file.size / (1024 * 1024 * 1024);
+  if (sizeGb > 2) {
+    const ok = confirm(
+      `Soubor má ${sizeGb.toFixed(1)} GB. Prohlížeč má paměťový limit kolem 2 GB a konverze pravděpodobně selže.\n\n` +
+      `Doporučení: zmenši soubor předem (HandBrake) nebo zvol kompatibilní formát (.mp4 s H.264 + AAC).\n\n` +
+      `Přesto pokračovat?`
+    );
+    if (!ok) return;
+  }
+
+  if (conversionInProgress) {
+    alert('Konverze už probíhá, počkej prosím na její dokončení.');
+    return;
+  }
+  conversionInProgress = true;
+
+  const progressEl = document.getElementById('conversionProgress');
+  const progressBar = document.getElementById('progressBar');
+  const progressText = document.getElementById('progressText');
+  const progressPct = document.getElementById('progressPercent');
+
+  progressEl.hidden = false;
+  progressBar.style.width = '0%';
+  progressPct.textContent = '0 %';
+  progressText.textContent = 'Připravuji konverzi…';
+
+  try {
+    const blob = await convertFile(file, {
+      onLoading: () => {
+        progressText.textContent = ffmpegInstance
+          ? 'Spouštím ffmpeg…'
+          : 'Stahuji ffmpeg (~30 MB, jen poprvé)…';
+      },
+      onReading: () => {
+        progressText.textContent = 'Načítám soubor do paměti…';
+      },
+      onConverting: () => {
+        progressText.textContent = 'Konvertuji video a převádím audio (5.1 → stereo)…';
+      },
+      onProgress: pct => {
+        progressBar.style.width = `${pct * 100}%`;
+        progressPct.textContent = `${Math.round(pct * 100)} %`;
+      },
+      onFinalizing: () => {
+        progressBar.style.width = '100%';
+        progressPct.textContent = '100 %';
+        progressText.textContent = 'Dokončuji…';
+      },
+    });
+    video.src = URL.createObjectURL(blob);
+  } catch (err) {
+    console.error('Konverze selhala:', err);
+    alert(
+      `Konverze selhala: ${err.message || err}\n\n` +
+      `Možné příčiny:\n` +
+      `• Soubor je příliš velký pro paměť prohlížeče (>2 GB)\n` +
+      `• Neobvyklý video codec (např. AV1, ProRes)\n` +
+      `• Selhalo načtení ffmpeg z internetu\n\n` +
+      `Zkus jiný soubor, obnov stránku, nebo soubor převeď předem přes HandBrake.`
+    );
+  } finally {
+    conversionInProgress = false;
+    progressEl.hidden = true;
+  }
+}
+
+document.getElementById('videoInput').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
   e.target.blur(); // aby Space hned po nahrání neotevřel dialog znovu
+  await loadVideoFile(file);
 });
 video.addEventListener('loadedmetadata', renderAll);
 
