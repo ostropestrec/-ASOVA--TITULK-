@@ -147,6 +147,28 @@
     transition: background 0.1s, box-shadow 0.1s;
   }
   .sub-block:hover { background: #5a9ff5; box-shadow: 0 0 0 2px #ffcc00; }
+  .sub-block.start-anchor {
+    background: #2ea66a;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.4), 0 0 0 2px #4eda90;
+  }
+  .sub-block.start-anchor::before { content: '🏁 '; }
+  .sub-block.start-anchor:hover { background: #34c07b; }
+  .sub-block.balast { opacity: 0.4; background: #555; }
+  .sub-block.balast:hover { opacity: 0.65; background: #666; box-shadow: 0 0 0 2px #ffcc00; }
+
+  .ctx-menu {
+    position: fixed; background: #2a2a2a; border: 1px solid #555;
+    border-radius: 4px; padding: 4px 0; z-index: 1000;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.6);
+    min-width: 240px; user-select: none;
+  }
+  .ctx-menu[hidden] { display: none; }
+  .ctx-item {
+    padding: 7px 14px; cursor: pointer; color: #ddd;
+    font-size: 13px; white-space: nowrap;
+  }
+  .ctx-item:hover { background: #3a7bd5; color: #fff; }
+  .ctx-item[hidden] { display: none; }
 
   .playhead {
     position: absolute; top: 0; height: 100px; width: 2px;
@@ -197,9 +219,14 @@
 </head>
 <body>
 
+<div class="ctx-menu" id="ctxMenu" hidden>
+  <div class="ctx-item" id="ctxSetStart">🏁 Označit jako začátek titulků</div>
+  <div class="ctx-item" id="ctxClearStart" hidden>Zrušit označení začátku</div>
+</div>
+
 <div class="controls">
-  <label>Video: <input type="file" id="videoInput" accept="video/*"></label>
-  <label>Titulky (.srt): <input type="file" id="srtInput" accept=".srt"></label>
+  <label>Video: <input type="file" id="videoInput"></label>
+  <label>Titulky (.srt): <input type="file" id="srtInput"></label>
   <span class="sep"></span>
   <button id="back10Btn" class="secondary" title="←">⏪ -<span id="stepLabelBack">2</span> s</button>
   <button id="fwd10Btn" class="secondary" title="→">+<span id="stepLabelFwd">2</span> s ⏩</button>
@@ -244,6 +271,7 @@
   <b>Tažení značky</b> = posunout ji po pásu &nbsp;•&nbsp;
   <b>Tažení červené čáry</b> = scrub videa (přesouvá zároveň obraz) &nbsp;•&nbsp;
   <b>Klik na titulek</b> = přitáhnout ke značce (nebo k playheadu, pokud značka chybí) &nbsp;•&nbsp;
+  <b>Pravý klik na titulek</b> = označit jako začátek titulků (přeskočí úvodní balast) &nbsp;•&nbsp;
   <b>Přichytit začátek</b> = srovná první titulek se žlutou značkou &nbsp;•&nbsp;
   <b>Natáhnout / Zkrátit</b> = proporcionálně přepočítá titulky o zadané sekundy; záporné číslo zkrátí (první titulek zůstane, posune se konec) &nbsp;•&nbsp;
   <b>Tažení pásu</b> = ruční posun celých titulků &nbsp;•&nbsp;
@@ -284,6 +312,12 @@ let subtitles = [];
 let offsetSec = 0;       // additivní posun (sekundy)
 let factorScale = 1;     // multiplikativní natažení (1 = beze změny, 1.01 = +1 %)
 let markerTime = null;
+let startSubIdx = null;  // index titulku označeného jako „skutečný" začátek (null = použij subtitles[0])
+
+function effectiveStartIdx() {
+  if (startSubIdx !== null && startSubIdx >= 0 && startSubIdx < subtitles.length) return startSubIdx;
+  return 0;
+}
 
 let mouseDownOn = null;          // 'marker' | 'playhead' | 'sub' | 'empty' | null
 let mouseDownTarget = null;
@@ -364,6 +398,8 @@ function renderSubs() {
     const stEnd = s.end * factorScale;
     const block = document.createElement('div');
     block.className = 'sub-block';
+    if (i === startSubIdx) block.classList.add('start-anchor');
+    if (startSubIdx !== null && i < startSubIdx) block.classList.add('balast');
     block.dataset.idx = i;
     block.style.left = `${stStart * PX_PER_SECOND}px`;
     block.style.width = `${Math.max(20, (stEnd - stStart) * PX_PER_SECOND)}px`;
@@ -502,6 +538,7 @@ document.getElementById('srtInput').addEventListener('change', async e => {
   offsetSec = 0;
   factorScale = 1;
   markerTime = null;
+  startSubIdx = null;
   // předvyplnit název jen pokud ještě nemáme video (to má přednost)
   if (!video.src) {
     const baseName = file.name.replace(/\.srt$/i, '');
@@ -656,8 +693,9 @@ document.querySelectorAll('button').forEach(btn => {
 document.getElementById('snapStartBtn').addEventListener('click', () => {
   if (!subtitles.length) { alert('Nejprve načti .srt'); return; }
   if (markerTime === null) { alert('Nejprve polož žlutou značku v pásu (klikni do prázdna v pásu).'); return; }
-  // přichytí první titulek na značku, zachová natažení
-  offsetSec = markerTime - subtitles[0].start * factorScale;
+  // přichytí označený / první titulek na značku, zachová natažení
+  const idx = effectiveStartIdx();
+  offsetSec = markerTime - subtitles[idx].start * factorScale;
   applyOffset();
 });
 
@@ -668,11 +706,13 @@ document.getElementById('stretchInput').addEventListener('change', () => {
   if (subtitles.length < 2) { updateFactorInput(); return; }
   const x = parseFloat(el.value);
   if (!isFinite(x)) { updateFactorInput(); return; }
-  const s0 = subtitles[0].start;
+  // Použijeme označený začátek (nebo subtitles[0]) jako kotvu, poslední titulek jako protilehlý bod
+  const startIdx = effectiveStartIdx();
+  const s0 = subtitles[startIdx].start;
   const sN = subtitles[subtitles.length - 1].start;
   const span = sN - s0;
   if (span < 0.001) { updateFactorInput(); return; }
-  // zachovat současnou pozici prvního titulku
+  // zachovat současnou pozici označeného/prvního titulku
   const currentFirst = s0 * factorScale + offsetSec;
   const newFactor = 1 + x / span;
   if (newFactor <= 0) {
@@ -690,6 +730,47 @@ document.getElementById('clearMarkerBtn').addEventListener('click', () => {
   markerTime = null;
   updateMarker();
 });
+
+// === Kontextové menu pro označení začátku titulků ===
+const ctxMenu = document.getElementById('ctxMenu');
+let ctxSubIdx = null;
+
+subsTrack.addEventListener('contextmenu', e => {
+  const block = e.target.closest('.sub-block');
+  if (!block) return;
+  e.preventDefault();
+  ctxSubIdx = parseInt(block.dataset.idx, 10);
+  const isStart = (startSubIdx === ctxSubIdx);
+  document.getElementById('ctxSetStart').hidden = isStart;
+  document.getElementById('ctxClearStart').hidden = !isStart;
+  ctxMenu.hidden = false;
+  // udrž menu uvnitř okna
+  const menuWidth = 260;
+  ctxMenu.style.left = `${Math.min(e.clientX, window.innerWidth - menuWidth)}px`;
+  ctxMenu.style.top = `${Math.min(e.clientY, window.innerHeight - 80)}px`;
+});
+
+document.getElementById('ctxSetStart').addEventListener('click', () => {
+  if (ctxSubIdx !== null) {
+    startSubIdx = ctxSubIdx;
+    renderSubs();
+  }
+  ctxMenu.hidden = true;
+});
+document.getElementById('ctxClearStart').addEventListener('click', () => {
+  startSubIdx = null;
+  renderSubs();
+  ctxMenu.hidden = true;
+});
+
+// Zavři menu při kliknutí mimo / Esc / pravém kliku jinde
+document.addEventListener('mousedown', e => {
+  if (ctxMenu.hidden) return;
+  if (!e.target.closest('.ctx-menu')) ctxMenu.hidden = true;
+});
+document.addEventListener('keydown', e => {
+  if (e.code === 'Escape' && !ctxMenu.hidden) ctxMenu.hidden = true;
+}, true);
 
 document.getElementById('resetBtn').addEventListener('click', () => {
   offsetSec = 0;
